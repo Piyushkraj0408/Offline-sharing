@@ -1,0 +1,304 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Share - Offline LAN</title>
+
+    <style>
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 35px auto;
+            padding: 16px;
+            background: #f3f6fb;
+            color: #1f2937;
+        }
+
+        .card {
+            background: white;
+            padding: 22px;
+            margin-bottom: 20px;
+            border-radius: 12px;
+            box-shadow: 0 3px 12px #0000000c;
+        }
+
+        h1 { color: #2563eb; }
+
+        input { max-width: 100%; }
+
+        button {
+            padding: 11px 18px;
+            border: none;
+            border-radius: 6px;
+            background: #2563eb;
+            color: white;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: .6;
+            cursor: wait;
+        }
+
+        progress {
+            width: 100%;
+            height: 18px;
+            margin-top: 12px;
+        }
+
+        #status {
+            overflow-wrap: anywhere;
+        }
+
+        .item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 13px 5px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .item-name {
+            overflow-wrap: anywhere;
+        }
+
+        a { color: #2563eb; }
+
+        .muted {
+            color: #6b7280;
+            font-size: 14px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Smart Share</h1>
+    <p>Fast offline file sharing over your local network.</p>
+
+    <section class="card">
+        <h2>Upload Files or Folders</h2>
+
+        <label for="fileInput">Select individual or multiple files:</label>
+        <input type="file" id="fileInput" multiple>
+
+        <br><br>
+
+        <label for="folderInput">Select an entire folder:</label>
+        <input type="file" id="folderInput" webkitdirectory multiple>
+
+        <br><br>
+
+        <button id="uploadButton" onclick="uploadItems()">
+            Upload to Server
+        </button>
+
+        <progress id="progress" value="0" max="100"></progress>
+        <p id="status" role="status" aria-live="polite">
+            Ready to upload.
+        </p>
+        <p id="speed" class="muted"></p>
+    </section>
+
+    <section class="card">
+        <h2>All Server Files</h2>
+        <p class="muted">
+            Files and folders saved on your server.
+        </p>
+
+        <button onclick="loadItems()">Refresh List</button>
+        <div id="files">Loading files...</div>
+    </section>
+
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script>
+        const socket = io();
+
+        socket.on("refreshFiles", loadItems);
+
+        async function loadItems() {
+            const container = document.getElementById("files");
+
+            try {
+                const response = await fetch("/api/items");
+
+                if (!response.ok) {
+                    throw new Error("Could not load files.");
+                }
+
+                const items = await response.json();
+                container.replaceChildren();
+
+                if (!items.length) {
+                    container.textContent = "No uploaded files yet.";
+                    return;
+                }
+
+                for (const item of items) {
+                    const row = document.createElement("div");
+                    row.className = "item";
+
+                    const name = document.createElement("span");
+                    name.className = "item-name";
+                    name.textContent =
+                        (item.type === "folder" ? "📁 " : "📄 ") +
+                        item.path;
+
+                    const link = document.createElement("a");
+                    link.href = "/download?path=" +
+                        encodeURIComponent(item.path);
+
+                    link.textContent = item.type === "folder"
+                        ? "Download ZIP"
+                        : "Download";
+
+                    if (item.type === "file") {
+                        link.download = item.name;
+                    }
+
+                    row.append(name, link);
+                    container.appendChild(row);
+                }
+            } catch (error) {
+                container.textContent = error.message;
+            }
+        }
+
+        function uploadItems() {
+            const fileInput = document.getElementById("fileInput");
+            const folderInput = document.getElementById("folderInput");
+            const button = document.getElementById("uploadButton");
+            const status = document.getElementById("status");
+            const speed = document.getElementById("speed");
+            const progress = document.getElementById("progress");
+
+            const selected = [
+                ...Array.from(fileInput.files).map(file => ({
+                    file,
+                    path: file.name
+                })),
+                ...Array.from(folderInput.files).map(file => ({
+                    file,
+                    path: file.webkitRelativePath || file.name
+                }))
+            ];
+
+            if (!selected.length) {
+                status.textContent = "Select files or a folder first.";
+                return;
+            }
+
+            const formData = new FormData();
+
+            for (const item of selected) {
+                formData.append("relativePaths", item.path);
+                formData.append("files", item.file, item.file.name);
+            }
+
+            const xhr = new XMLHttpRequest();
+            const startedAt = performance.now();
+
+            let lastTime = startedAt;
+            let lastLoaded = 0;
+            let currentSpeed = 0;
+
+            button.disabled = true;
+            progress.value = 0;
+            speed.textContent = "";
+            status.textContent = `Preparing ${selected.length} file(s)...`;
+
+            xhr.open("POST", "/upload");
+            xhr.timeout = 0;
+
+            xhr.upload.onloadstart = () => {
+                status.textContent = "Uploading...";
+            };
+
+            xhr.upload.onprogress = event => {
+                if (!event.lengthComputable) return;
+
+                const now = performance.now();
+                const elapsed = (now - lastTime) / 1000;
+
+                if (elapsed >= 0.5) {
+                    currentSpeed =
+                        (event.loaded - lastLoaded) / elapsed / (1024 * 1024);
+
+                    lastTime = now;
+                    lastLoaded = event.loaded;
+                }
+
+                const percent = Math.round(
+                    event.loaded / event.total * 100
+                );
+
+                progress.value = percent;
+
+                status.textContent =
+                    `Uploading: ${percent}% — ` +
+                    `${(event.loaded / 1024 / 1024).toFixed(1)} MB sent`;
+
+                speed.textContent =
+                    `Current speed: ${currentSpeed.toFixed(2)} MB/s`;
+            };
+
+            xhr.onload = async () => {
+                button.disabled = false;
+
+                let result;
+
+                try {
+                    result = JSON.parse(xhr.responseText);
+                } catch {
+                    status.textContent = "Invalid server response.";
+                    return;
+                }
+
+                if (xhr.status < 200 || xhr.status >= 300) {
+                    status.textContent =
+                        result.message || "Upload failed.";
+                    return;
+                }
+
+                progress.value = 100;
+                status.textContent =
+                    `${result.message} ${result.count} file(s) saved on server.`;
+
+                const elapsed = (performance.now() - startedAt) / 1000;
+                speed.textContent =
+                    `Upload request completed in ${elapsed.toFixed(1)} seconds.`;
+
+                fileInput.value = "";
+                folderInput.value = "";
+
+                await loadItems();
+            };
+
+            xhr.onerror = () => {
+                button.disabled = false;
+                status.textContent =
+                    "Network error. Check the Wi-Fi connection and retry.";
+            };
+
+            xhr.onabort = () => {
+                button.disabled = false;
+                status.textContent = "Upload cancelled.";
+            };
+
+            xhr.ontimeout = () => {
+                button.disabled = false;
+                status.textContent = "Upload timed out.";
+            };
+
+            xhr.send(formData);
+        }
+
+        loadItems();
+    </script>
+</body>
+</html>
